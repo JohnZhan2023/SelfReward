@@ -1,0 +1,10 @@
+ml-collections
+absl-py
+diffusers==0.26.1
+wandb
+transformers==4.40.1
+accelerate==0.24.1
+torch>=2.3.0
+torchvision>=0.18.0
+mmengine
+peft
