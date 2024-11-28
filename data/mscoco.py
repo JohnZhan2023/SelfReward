@@ -26,3 +26,23 @@ class MSCOCO(Dataset):
         if self.transform:
             img = self.transform(img)
         return img, anns, img_info
+
+
+if __name__ == '__main__':
+    root = '/mnt/disk5/zhanjh/mscoco/train2017'
+    ann_file = '/mnt/disk5/zhanjh/mscoco/annotations/captions_train2017.json'
+    mscoco = MSCOCO(root, ann_file)
+    print("the length of mscoco caption is: ",len(mscoco))
+    img, anns, img_info = mscoco[0]
+    print(img.size)
+    print(anns)
+    print(img_info)
+    draw = ImageDraw.Draw(img)
+    i = 0
+    for ann in anns:
+        caption = ann['caption']
+        # write the caption on the image
+        draw.text((0, i), caption)
+        i += 10
+    img.save('test.jpg')
+    print('done')
