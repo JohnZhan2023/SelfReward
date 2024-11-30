@@ -32,6 +32,34 @@ def basic_config():
     config.neg_root = '/mnt/disk5/zhanjh/mscoco/negative_sample'
     config.ann_file = '/mnt/disk5/zhanjh/mscoco/annotations/captions_train2017.json'
     
+    ###### Training ######
+    config.num_epochs = 20
+    config.batchsize = 8
+    # resume training from a checkpoint. either an exact checkpoint directory (e.g. checkpoint_50), or a directory
+    # containing checkpoints, in which case the latest one will be used. `config.use_lora` must be set to the same value
+    # as the run that generated the saved checkpoint.
+    config.resume_from = ""
+    config.train = train = ml_collections.ConfigDict()
+    # batch size (per GPU!) to use for training.
+    train.train_batch_size = 10
+    # whether to use the 8bit Adam optimizer from bitsandbytes.
+    train.use_8bit_adam = False
+    # learning rate.
+    train.learning_rate = 6e-5
+    # Adam beta1.
+    train.adam_beta1 = 0.9
+    # Adam beta2.
+    train.adam_beta2 = 0.999
+    # Adam weight decay.
+    train.adam_weight_decay = 1e-4
+    # Adam epsilon.
+    train.adam_epsilon = 1e-8
+    # number of gradient accumulation steps. the effective batch size is `batch_size * num_gpus *
+    # gradient_accumulation_steps`.
+    train.gradient_accumulation_steps = 1
+    # maximum gradient norm for gradient clipping.
+    train.max_grad_norm = 1.0
+    
     
     ##### dataloader ####
     config.dataloader_num_workers = 16

@@ -32,7 +32,7 @@ config_flags.DEFINE_config_file(
     "configs/reward_model_clip.py", 
     "Training configuration."
 )
-
+os.environ["WANDB_DISABLED"]="true"
 logger = get_logger(__name__)
 
 
@@ -113,12 +113,11 @@ def main(_):
     neg_root = config.neg_root
     train_dataset = MSCOCO_WinLoss(root, neg_root, ann_file, transform=None, mode="train")
     val_dataset = MSCOCO_WinLoss(root, neg_root, ann_file, transform=None, mode="val")
-    collate_fn = collate_fn
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         collate_fn=collate_fn,
-        batch_size=config.sample.sample_batch_size,
+        batch_size=config.batchsize,
         num_workers=config.dataloader_num_workers,
         shuffle=config.train_dataloader_shuffle,
         pin_memory=config.dataloader_pin_memory,
@@ -128,7 +127,7 @@ def main(_):
     val_dataloader = torch.utils.data.DataLoader(
         val_dataset,
         collate_fn=collate_fn,
-        batch_size=config.sample.sample_batch_size,
+        batch_size=config.batchsize,
         num_workers=config.dataloader_num_workers,
         shuffle=config.val_dataloader_shuffle,
         pin_memory=config.dataloader_pin_memory,
@@ -148,8 +147,7 @@ def main(_):
 
     logger.info("***** Running training *****")
     logger.info(f"  Num Epochs = {config.num_epochs}")
-    logger.info(f"  Sampling batch size per device = {config.sample.sample_batch_size}")
-    logger.info(f"  Training batch size per device = {config.train.train_batch_size}")
+    logger.info(f"  Training batch size per device = {config.batchsize}")
     logger.info(f"  Gradient Accumulation steps = {config.train.gradient_accumulation_steps}")
     logger.info("")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_train_batch_size}")
@@ -181,8 +179,10 @@ def main(_):
         ):
             with autocast():
                 img, labels, anns, img_info = batch
-                predicitons = clip_reward_model(img)
-                loss = torch.nn.functional.binary_cross_entropy_with_logits(predicitons, labels)
+                predictions = clip_reward_model(img)
+                predictions = predictions.float()  # Ensure predictions are float
+                labels = labels.float()  # Ensure labels are float  
+                loss = torch.nn.functional.binary_cross_entropy_with_logits(predictions, labels)
                 train_loss += loss.item()
             accelerator.backward(loss)
             
@@ -191,20 +191,24 @@ def main(_):
                 optimizer.step()
                 optimizer.zero_grad()
             global_step += 1
-            accelerator.update_global_step()
+            if accelerator.sync_gradients:
+                info = {
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "step": global_step,
+                    "train_loss": loss.item(),
+                }
+                accelerator.log(info, step=global_step)
+                train_loss = 0.0
+            
+
         ########## save ckpt and evaluation ##########
         if accelerator.is_main_process:
             accelerator.save_state(
                 os.path.join(config.logdir, config.run_name, f"checkpoint_{epoch}"),
                 global_step=global_step,
             )
-            with open(os.path.join(config.logdir, config.run_name, "global_step.json"), "w") as f:
-                json.dump({"global_step": global_step}, f)
-            accelerator.log_metrics(
-                {"train_loss": train_loss / len(train_dataloader)},
-                global_step=global_step,
-                split="train",
-            )
+
             val_loss = 0.0
             val_acc = 0.0
             for batch in tqdm(
@@ -217,17 +221,21 @@ def main(_):
                 with autocast():
                     img, labels, anns, img_info = batch
                     predicitons = clip_reward_model(img)
+                    predictions = predictions.float()  # Ensure predictions are float
+                    labels = labels.float()  # Ensure labels are float  
                     loss = torch.nn.functional.binary_cross_entropy_with_logits(predicitons, labels)
                     val_loss += loss.item()
                     # calculate accuracy
-                    predicitons = torch.softmax(predicitons, dim=1)
+                    predicitons = torch.softmax(predicitons, dim=1) # bsz x 2
                     predicitons = (predicitons > 0.5).float()
-                    val_acc += (predicitons == labels).sum().item()
-            accelerator.log_metrics(
-                {"val_loss": val_loss / len(val_dataloader), "val_acc": val_acc / (len(val_dataloader) * config.sample.sample_batch_size)},
-                global_step=global_step,
-                split="val",
+                    predicted_classes = torch.argmax(predicitons, dim=1)
+                    labels_classes = torch.argmax(labels, dim=1)
+                    val_acc += (predicted_classes == labels_classes).sum().item()
+            accelerator.log(
+                {"val_loss": val_loss / len(val_dataloader), "val_acc": val_acc / (len(val_dataloader) * config.batchsize)},
+                step=global_step,
             )
+            logger.info(f"Epoch {epoch} validation acc: {val_acc / (len(val_dataloader) * config.batchsize)}")
         
         
     # Save the final model

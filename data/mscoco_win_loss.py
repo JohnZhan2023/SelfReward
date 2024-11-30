@@ -65,7 +65,9 @@ def collate_fn(batch):
     imgs, labels, anns, img_info = zip(*batch)
     
     # Resize images to the same size, for example (256, 256)
-    resize_transform = transforms.Resize((256, 256))  # Resize to (256, 256)
+    resize_transform = transforms.Resize((224, 224), antialias= True)  # Resize to (224, 224)
+    # Convert images to tensor
+    imgs = [transforms.ToTensor()(img) for img in imgs]
     
     # Resize images (already converted to tensor after resize)
     imgs_resized = [resize_transform(img) for img in imgs]
