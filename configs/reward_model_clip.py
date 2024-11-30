@@ -10,7 +10,7 @@ def basic_config():
     # random seed for reproducibility.
     config.seed = 42
     # number of checkpoints to keep before overwriting old ones.
-    config.num_checkpoint_limit = None
+    config.num_checkpoint_limit = 5
     # allow tf32 on Ampere GPUs, which can speed up training.
     config.allow_tf32 = True
     # whether or not to use xFormers to reduce memory usage.
@@ -33,7 +33,7 @@ def basic_config():
     config.ann_file = '/mnt/disk5/zhanjh/mscoco/annotations/captions_train2017.json'
     
     ###### Training ######
-    config.num_epochs = 20
+    config.num_epochs = 100
     config.batchsize = 8
     # resume training from a checkpoint. either an exact checkpoint directory (e.g. checkpoint_50), or a directory
     # containing checkpoints, in which case the latest one will be used. `config.use_lora` must be set to the same value
@@ -41,7 +41,7 @@ def basic_config():
     config.resume_from = ""
     config.train = train = ml_collections.ConfigDict()
     # batch size (per GPU!) to use for training.
-    train.train_batch_size = 10
+    train.eval_on_start = True
     # whether to use the 8bit Adam optimizer from bitsandbytes.
     train.use_8bit_adam = False
     # learning rate.
@@ -60,12 +60,17 @@ def basic_config():
     # maximum gradient norm for gradient clipping.
     train.max_grad_norm = 1.0
     
+    ##### evaluation ####
+    config.eval = eval = ml_collections.ConfigDict()
+    eval.show_distribution = True
+    eval.visualization_path = "tmp/visualization"
+    
     
     ##### dataloader ####
-    config.dataloader_num_workers = 16
+    config.dataloader_num_workers = 4
     config.train_dataloader_shuffle = True
     config.val_dataloader_shuffle = False
-    config.dataloader_pin_memory = True
+    config.dataloader_pin_memory = False
     config.dataloader_drop_last = False
 
     

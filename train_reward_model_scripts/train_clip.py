@@ -25,14 +25,14 @@ from spo.datasets import build_dataset
 
 from spo.preference_models.models.clip import CLIPForBinaryClassification
 from data.mscoco_win_loss import MSCOCO_WinLoss, collate_fn
-
+from PIL import Image
 FLAGS = flags.FLAGS
 config_flags.DEFINE_config_file(
     "config", 
     "configs/reward_model_clip.py", 
     "Training configuration."
 )
-os.environ["WANDB_DISABLED"]="true"
+os.environ["WANDB_DISABLED"]="False"
 logger = get_logger(__name__)
 
 
@@ -133,16 +133,12 @@ def main(_):
         pin_memory=config.dataloader_pin_memory,
         drop_last=config.dataloader_drop_last,
     )
-    # for some reason, autocast is necessary for non-lora training but not for lora training, and it uses
-    # more memory
-    autocast = contextlib.nullcontext if config.use_lora else accelerator.autocast
-    
+
     # Prepare everything with `accelerator`.
     clip_reward_model, optimizer, train_dataloader, val_dataloader = accelerator.prepare(clip_reward_model, optimizer, train_dataloader, val_dataloader)
-        
     # Train!
     total_train_batch_size = (
-        config.train.train_batch_size * accelerator.num_processes * config.train.gradient_accumulation_steps
+        config.batchsize * accelerator.num_processes * config.train.gradient_accumulation_steps
     )
 
     logger.info("***** Running training *****")
@@ -169,68 +165,88 @@ def main(_):
         disable=not accelerator.is_local_main_process,
         desc="Epoch",
         position=0,
-    ):
-        train_loss = 0.0
-        for batch in tqdm(
-            train_dataloader, 
-            disable=not accelerator.is_local_main_process,
-            desc="Batch",
-            position=1,
-        ):
-            with autocast():
-                img, labels, anns, img_info = batch
-                predictions = clip_reward_model(img)
-                predictions = predictions.float()  # Ensure predictions are float
-                labels = labels.float()  # Ensure labels are float  
-                loss = torch.nn.functional.binary_cross_entropy_with_logits(predictions, labels)
-                train_loss += loss.item()
-            accelerator.backward(loss)
-            
-                
-            if global_step % config.train.gradient_accumulation_steps == 0:
-                optimizer.step()
-                optimizer.zero_grad()
-            global_step += 1
-            if accelerator.sync_gradients:
-                info = {
-                    "epoch": epoch,
-                    "global_step": global_step,
-                    "step": global_step,
-                    "train_loss": loss.item(),
-                }
-                accelerator.log(info, step=global_step)
-                train_loss = 0.0
+    ):  
+        if not(config.train.eval_on_start and epoch == 0):
+            train_loss = 0.0
+            for batch in tqdm(
+                train_dataloader, 
+                disable=not accelerator.is_local_main_process,
+                desc="Batch",
+                position=1,
+            ):
+                with accelerator.accumulate(clip_reward_model):
+                    img, labels, anns, img_info = batch
+                    predictions = clip_reward_model(img)
+                    predictions = predictions.float()  # Ensure predictions are float
+                    labels = labels.float()  # Ensure labels are float  
+                    loss = torch.nn.functional.binary_cross_entropy_with_logits(predictions, labels)
+                    train_loss += loss.item()
+
+                    accelerator.backward(loss)  
+
+                    if global_step % config.train.gradient_accumulation_steps == 0:
+                        optimizer.step()  
+                        optimizer.zero_grad() 
+                global_step += 1
+                if accelerator.sync_gradients:
+                    info = {
+                        "epoch": epoch,
+                        "global_step": global_step,
+                        "step": global_step,
+                        "train_loss": loss.item(),
+                    }
+                    accelerator.log(info, step=global_step)
+                    train_loss = 0.0
             
 
         ########## save ckpt and evaluation ##########
         if accelerator.is_main_process:
-            accelerator.save_state(
-                os.path.join(config.logdir, config.run_name, f"checkpoint_{epoch}"),
-                global_step=global_step,
-            )
+            if (epoch + 1) % config.save_interval == 0 and not config.train.eval_on_start:
+                accelerator.save_state(os.path.join(config.logdir, config.run_name, f'checkpoint_{epoch}'))
+                with open(os.path.join(config.logdir, config.run_name, f'checkpoint_{epoch}', 'global_step.json'), 'w') as f:
+                    json.dump({'global_step': global_step}, f)
 
             val_loss = 0.0
             val_acc = 0.0
-            for batch in tqdm(
+            for batch_id, batch in enumerate(tqdm(
                 val_dataloader, 
                 disable=not accelerator.is_local_main_process,
                 desc="Validation Batch",
                 position=1,
-            ):
-                
-                with autocast():
+            )):
+                with torch.no_grad():  
                     img, labels, anns, img_info = batch
-                    predicitons = clip_reward_model(img)
+                    predictions = clip_reward_model(img)
                     predictions = predictions.float()  # Ensure predictions are float
                     labels = labels.float()  # Ensure labels are float  
-                    loss = torch.nn.functional.binary_cross_entropy_with_logits(predicitons, labels)
+                    loss = torch.nn.functional.binary_cross_entropy_with_logits(predictions, labels)
                     val_loss += loss.item()
                     # calculate accuracy
-                    predicitons = torch.softmax(predicitons, dim=1) # bsz x 2
-                    predicitons = (predicitons > 0.5).float()
-                    predicted_classes = torch.argmax(predicitons, dim=1)
+                    predictions = torch.softmax(predictions, dim=1) # bsz x 2
+                    predicted_classes = torch.argmax(predictions, dim=1)
                     labels_classes = torch.argmax(labels, dim=1)
+
                     val_acc += (predicted_classes == labels_classes).sum().item()
+                    
+                    #### Visualize the predictions and labels ####
+                    if config.eval.show_distribution and batch_id == 0 and epoch % 20 == 0:
+                        # Visualize the predictions and labels
+                        # Save the images and labels
+                        for i in range(config.batchsize):
+                            # Save the image
+                            img_to_save = img[i].permute(1, 2, 0).cpu().numpy()
+                            img_to_save = (img_to_save * 255).astype('uint8')
+                            img_to_save = Image.fromarray(img_to_save)
+                            softclass = predictions[i][0].cpu().numpy() # the probability of the image being real
+                            if labels_classes[i]==0:
+                                tag = 1
+                            else:
+                                tag = 0
+                            # ensure the visualization path exists
+                            if not os.path.exists(config.eval.visualization_path):
+                                os.makedirs(config.eval.visualization_path)
+                            img_to_save.save(os.path.join(config.eval.visualization_path, f"{epoch}_image_{i}_lable_{tag}_softclass_{softclass}.png"))
+                                    
             accelerator.log(
                 {"val_loss": val_loss / len(val_dataloader), "val_acc": val_acc / (len(val_dataloader) * config.batchsize)},
                 step=global_step,
@@ -239,11 +255,11 @@ def main(_):
         
         
     # Save the final model
-    accelerator.wait_for_everyone()
-    accelerator.save_state(
-        os.path.join(config.logdir, config.run_name, f"checkpoint_{epoch}"),
-        global_step=global_step,
-    )
+    if accelerator.is_main_process:
+        accelerator.save_state(
+            os.path.join(config.logdir, config.run_name, f"checkpoint_{epoch}"),
+            global_step=global_step,
+        )
     
     accelerator.end_training()
 
